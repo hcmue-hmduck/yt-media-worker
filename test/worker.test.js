@@ -13,8 +13,9 @@ test('authentication, URL validation, job completion and protected file download
   await writeFile(fake, `#!/usr/bin/env node
 const fs = require('node:fs');
 const args = process.argv.slice(2);
-if (args.includes('--dump-single-json')) console.log(JSON.stringify({duration:60}));
-else { fs.writeFileSync(args[args.indexOf('-o')+1].replace('%(ext)s','mp4'), 'test-video'); console.log('download:100%'); }
+if (process.env.WORKER_SECRET) process.exit(9);
+if (args[0] === 'metadata') console.log(JSON.stringify({duration:60}));
+else { fs.writeFileSync(require('node:path').join(args[1], 'video.mp4'), 'test-video'); console.log('download:100%'); }
 `, { mode: 0o755 });
   const probe = net.createServer();
   probe.listen(0, '127.0.0.1');
@@ -23,7 +24,7 @@ else { fs.writeFileSync(args[args.indexOf('-o')+1].replace('%(ext)s','mp4'), 'te
   await new Promise(resolve => probe.close(resolve));
   const secret = 'test-secret-with-more-than-32-characters';
   const child = spawn(process.execPath, ['index.js'], {
-    env: { ...process.env, WORKER_SECRET: secret, PORT: String(port), YTDLP_BIN: fake, TMP_DIR: join(dir, 'files') },
+    env: { ...process.env, WORKER_SECRET: secret, PORT: String(port), MEDIA_EXECUTABLE: process.execPath, MEDIA_ENGINE_PATH: fake, TMP_DIR: join(dir, 'files') },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let logs = '';
@@ -46,7 +47,8 @@ else { fs.writeFileSync(args[args.indexOf('-o')+1].replace('%(ext)s','mp4'), 'te
   for (const url of ['http://youtube.com/watch?v=abcdefghijk', 'https://localhost/video', 'https://youtube.com.evil.test/watch?v=abcdefghijk']) {
     assert.equal((await fetch(base + '/api/jobs', { method: 'POST', headers, body: JSON.stringify({ url }) })).status, 400);
   }
-  const response = await fetch(base + '/api/jobs', { method: 'POST', headers, body: JSON.stringify({ url: 'https://youtu.be/abcdefghijk', height: 720 }) });
+  const response = await fetch(base + '/api/jobs', { method: 'POST', headers, body: JSON.stringify({ url: 'https://youtu.be/abcdefghijk', height: 1080 }) });
+  assert.equal((await fetch(base + '/api/jobs', { method: 'POST', headers, body: JSON.stringify({ url: 'https://youtu.be/abcdefghijk', height: 720 }) })).status, 400);
   assert.equal(response.status, 202);
   const { jobId } = await response.json();
   let job;

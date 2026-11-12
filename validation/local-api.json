@@ -1,0 +1,18 @@
+{
+  "branch": "youtubejs-sabr",
+  "video": "3lH2oqKK-3U",
+  "stage": "verified",
+  "health": {
+    "ok": true,
+    "engine": "youtubejs-sabr",
+    "minimumHeight": 1080
+  },
+  "create_http": 202,
+  "download_http": 200,
+  "dimensions": [
+    1920,
+    1080
+  ],
+  "bytes": 50125499,
+  "full_decode_exit_code": 0
+}

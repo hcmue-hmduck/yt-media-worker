@@ -2,9 +2,10 @@
 import http from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdir, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, statfs } from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 
 const secret = process.env.WORKER_SECRET;
@@ -17,7 +18,9 @@ let busy = false;
 const ttl = 15 * 60_000;
 const maxBytes = 500 * 1024 * 1024;
 const allowedOrigin = process.env.ALLOWED_ORIGIN;
-const executable = process.env.YTDLP_BIN || 'yt-dlp';
+const engineName = "youtubejs-sabr";
+const executable = process.env.MEDIA_EXECUTABLE || process.execPath;
+const enginePath = process.env.MEDIA_ENGINE_PATH || fileURLToPath(new URL('./engine.js', import.meta.url));
 
 function equal(a, b) {
   const left = Buffer.from(a || '');
@@ -41,7 +44,7 @@ function canonicalUrl(value) {
 }
 function run(args, job, timeout) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, ['--ignore-config', '--no-playlist', '--js-runtimes', 'node', ...args, '--', job.url], { detached: true });
+    const child = spawn(executable, [enginePath, ...args, job.url], { detached: true, env: Object.fromEntries(Object.entries(process.env).filter(([name]) => name !== 'WORKER_SECRET')) });
     job.child = child;
     let output = '';
     let error = '';
@@ -51,7 +54,7 @@ function run(args, job, timeout) {
     child.stdout.on('data', chunk => {
       output = (output + chunk).slice(-1_000_000);
       const progress = [...output.matchAll(/download:\s*([\d.]+)%/g)].at(-1);
-      if (progress) job.progress = Math.min(99, Number(progress[1]));
+      if (progress) job.progress = Math.max(job.progress, Math.min(99, Number(progress[1])));
     });
     child.stderr.on('data', chunk => { error = (error + chunk).slice(-4000); });
     child.on('error', err => { clearTimeout(timer); reject(err); });
@@ -71,18 +74,15 @@ async function work() {
   const job = queue.shift();
   job.status = 'processing';
   try {
-    const metadata = JSON.parse(await run(['--dump-single-json', '--skip-download', '--socket-timeout', '20'], job, 120_000));
-    if (metadata.is_live || metadata.was_live || !metadata.duration || metadata.duration > 1200) {
-      throw new Error('Only non-live videos up to 20 minutes are supported');
+    const metadata = JSON.parse(await run(['metadata'], job, 120_000));
+    if (metadata.is_live || metadata.was_live || !metadata.duration || metadata.duration > Number(process.env.MAX_DURATION_SECONDS || 1800)) {
+      throw new Error('Only non-live videos within MAX_DURATION_SECONDS (default 30 minutes) are supported');
     }
+    const retained = [...jobs.values()].reduce((total, item) => total + (item.status === 'completed' ? item.size : 0), 0);
+    const disk = await statfs(root);
+    if (retained > 1024 ** 3 || disk.bavail * disk.bsize < 1.5 * 1024 ** 3) throw new Error('Temporary storage is busy; retry after old files expire');
     job.dir = await mkdtemp(join(root, 'job-'));
-    await run([
-      '-f', `bv[ext=mp4][vcodec^=avc1][height<=${job.height}]+ba[ext=m4a]/b[ext=mp4][height<=${job.height}]`,
-      '--merge-output-format', 'mp4', '--max-filesize', String(maxBytes),
-      '--socket-timeout', '20', '--retries', '2', '--fragment-retries', '2',
-      '--newline', '--progress-template', 'download:%(progress._percent_str)s',
-      '-o', join(job.dir, 'video.%(ext)s'),
-    ], job, 15 * 60_000);
+    await run(['download', job.dir, String(job.height)], job, 15 * 60_000);
     job.file = join(job.dir, 'video.mp4');
     const info = await stat(job.file);
     if (!info.size || info.size > maxBytes) throw new Error('Output exceeds the 500 MiB limit');
@@ -122,7 +122,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     const url = new URL(req.url, 'http://localhost');
-    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true });
+    if (req.method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, engine: engineName, minimumHeight: 1080 });
     const match = /^\/api\/jobs\/([a-f0-9-]+)(\/download)?$/.exec(url.pathname);
     if (match?.[2] && req.method === 'GET') {
       const job = jobs.get(match[1]);
@@ -147,8 +147,8 @@ const server = http.createServer(async (req, res) => {
       let data, videoUrl;
       try { data = JSON.parse(body); videoUrl = canonicalUrl(data.url); }
       catch { return json(res, 400, { error: 'A valid HTTPS YouTube video URL is required' }); }
-      const height = data.height ?? 720;
-      if (![360, 480, 720, 1080].includes(height)) return json(res, 400, { error: 'Invalid height' });
+      const height = data.height ?? 1080;
+      if (height !== 1080) return json(res, 400, { error: 'This experimental branch requires height 1080' });
       const job = { id: randomUUID(), token: randomBytes(32).toString('hex'), url: videoUrl, height, status: 'queued', progress: 0 };
       jobs.set(job.id, job);
       queue.push(job);
