@@ -1,8 +1,14 @@
 {
-  "name": "youtube-media-worker",
-  "version": "0.1.0",
+  "name": "yt-media-worker-pytubefix",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
-  "scripts": { "start": "node index.js", "test": "node --test" }
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "dependencies": {}
 }

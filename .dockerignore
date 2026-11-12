@@ -1,4 +1,10 @@
 *
-!Dockerfile
 !package.json
+!package-lock.json
 !index.js
+!engine.js
+!engine.py
+!media-utils.js
+!requirements.txt
+!vendor/
+!vendor/**
