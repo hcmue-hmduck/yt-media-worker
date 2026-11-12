@@ -1,5 +1,12 @@
 .env
 .env.*
+!.env.example
 node_modules/
+.venv/
+__pycache__/
+*.pyc
 cookies.txt
 *.log
+downloads/
+*.mp4
+*.m4a

@@ -1,104 +1,40 @@
-# YouTube Media Worker
+# yt-media-worker — YouTube.js VISIONOS
 
-Service nhận URL YouTube, tải hình/tiếng bằng yt-dlp, ghép MP4 bằng FFmpeg và trả link tải tạm thời. Bạn tự tạo và quản lý tài nguyên Azure; source này không gọi API quản trị Azure.
+Nhánh `experiment/youtubejs-visionos` thử nghiệm riêng **YouTube.js VISIONOS**. Cùng API với các nhánh khác.
+Đã tải 1080p thành công trên Mac với video `3lH2oqKK-3U`; khả năng tải từ IP Render/Azure cần kiểm chứng riêng.
 
-## Nội dung
+## Deploy thủ công trên Render
 
-- `index.js`: HTTP API, hàng đợi một tác vụ mỗi lần, tải/ghép MP4 và dọn file.
-- `Dockerfile`: Node 24, Python, yt-dlp với EJS, FFmpeg; chạy bằng user không phải root.
-- `package.json`: không cần thư viện npm bên ngoài.
-- `test/worker.test.js`: kiểm thử API với yt-dlp giả lập, không gọi YouTube.
-
-## Cấu hình container
-
-- Lệnh chạy: mặc định Dockerfile, `node index.js`.
-- Cổng HTTP/target port: `8080`; dùng HTTPS ở ingress của nền tảng.
-- `WORKER_SECRET`: bắt buộc, chuỗi bí mật ngẫu nhiên ít nhất 32 ký tự. Đặt dưới dạng secret trên Azure và trong backend chính. Không đưa vào frontend.
-- `PORT`: mặc định `8080`.
-- `ALLOWED_ORIGIN`: tùy chọn, một origin chính xác nếu cần CORS. Luồng khuyên dùng là backend gọi API, trình duyệt chỉ mở link tải.
-- `TMP_DIR`: mặc định `/tmp/media-worker`; chỉ dùng thư mục riêng dành cho service vì khi khởi động service dọn các thư mục `job-` tại đây.
-
-Cấu hình thử nghiệm: 1 vCPU, 2 GiB RAM, min replicas = max replicas = 1, chế độ single revision. Giữ một replica để không scale-to-zero trong lúc chạy tác vụ nền. Đây là cấu hình dùng tài nguyên cả khi rảnh, có thể tiêu thụ credit. Job và file nằm trong RAM/ổ tạm: mất khi restart/deploy/stop. Không tăng replicas cho phiên bản này. Khi phục vụ nhiều người cần hàng đợi, trạng thái và kho file bền vững bên ngoài.
-
-Để triển khai thủ công, build Dockerfile thành image, push lên registry của bạn, rồi chọn image đó khi tạo Container App trong Azure Portal. Nền tảng cần build Dockerfile hoặc nhận container image; chỉ upload file ZIP không tự chạy được ứng dụng.
-
-## Chạy bằng Docker trên máy
-
-Cần Docker đã cài và đang chạy. Thay khóa mẫu bằng khóa ngẫu nhiên riêng, ít nhất 32 ký tự:
-
-```sh
-docker build -t media-worker .
-docker run --rm -p 8080:8080 -e WORKER_SECRET='THAY_BANG_KHOA_NGAU_NHIEN_IT_NHAT_32_KY_TU' media-worker
-```
+New Web Service → repo `hcmue-hmduck/yt-media-worker` → branch `experiment/youtubejs-visionos` → runtime Docker.
+Dockerfile: `./Dockerfile`, build context thư mục gốc. Để trống Command override.
+Đặt `WORKER_SECRET` là secret ngẫu nhiên ≥32 ký tự. Render cấp biến PORT tự động; Azure dùng target port 8080.
+Một instance/replica, không autoscale nhiều bản sao; job và file lưu tạm, mất khi restart/ngủ/deploy.
+Chưa xác minh Docker image trên máy local nếu Docker không có; GitHub Actions sẽ kiểm thử và build image.
+Workflow nhánh thử nghiệm chỉ build để kiểm chứng, không push image `latest` hoặc tự deploy Azure.
 
 ## API
 
-Các lệnh sau dùng URL local để minh họa; thay bằng URL HTTPS của service khi deploy. Thay khóa trong header bằng khóa bạn đã cấu hình.
+- `GET /health`: trạng thái HTTP server, tên engine và minimumHeight; không chứng minh tải YouTube được.
+- `POST /api/jobs`, header `Authorization: Bearer WORKER_SECRET`, body `{"url":"https://www.youtube.com/watch?v=VIDEO_ID","height":1080}` → HTTP 202, `{"jobId":"..."}`.
+- `GET /api/jobs/JOB_ID`, cùng header → queued/processing/completed/failed, progress, error, expiresAt và downloadPath khi xong.
+- Frontend tải trực tiếp từ URL worker + downloadPath (link token hết hạn), không cần khóa worker.
 
-### Kiểm tra hoạt động
+Mặc định **1080p**, chỉ nhận height 1080; yêu cầu nguồn H.264 MP4 và AAC. Không upscale, không tự hạ chất lượng.
+Ghép FFmpeg bằng `-c copy`, kiểm tra file chứa video ≥1080p và audio trước khi hoàn thành.
+Video tối đa 30 phút mặc định (`MAX_DURATION_SECONDS=1800`), một job chạy đồng thời, file cuối tối đa 500 MiB.
+File hết hạn sau 15 phút, dọn định kỳ 30 giây. Worker từ chối nhận xử lý khi không còn đủ ổ tạm.
+Progress là ước lượng; một số engine chỉ cập nhật sau từng stream. Không hỗ trợ resume/HTTP Range.
+Không hỗ trợ live, playlist, cookies đăng nhập. Video gốc không có 1080p hoặc bị YouTube chặn sẽ báo lỗi.
 
-```sh
-curl http://localhost:8080/health
-```
+Backend chính giữ khóa, xác thực người dùng, áp quota và lưu userId → jobId. Không đưa khóa vào frontend.
+Worker loại WORKER_SECRET khỏi môi trường của tiến trình engine. Hàng đợi chưa bền vững, chưa phù hợp chạy nhiều replica.
 
-Trả về `{"ok":true}`. Endpoint này kiểm tra HTTP server, không xác minh khả năng truy cập YouTube.
+## Chạy local
 
-### Tạo job (gọi từ backend)
+Node 24, FFmpeg phải có trên PATH (hoặc đặt FFMPEG_BIN trỏ tới executable).
+`npm ci`, rồi thiết lập WORKER_SECRET và `npm start`. Node không tự nạp file .env; có thể dùng `node --env-file=.env index.js`.
 
-```sh
-curl http://localhost:8080/api/jobs \
-  -H 'Authorization: Bearer THAY_BANG_KHOA_CUA_BAN' \
-  -H 'Content-Type: application/json' \
-  --data '{"url":"https://www.youtube.com/watch?v=VIDEO_ID","height":720}'
-```
+## Validation
 
-Thay VIDEO_ID bằng ID video thực (11 ký tự). Trả HTTP 202 và `{"jobId":"..."}`. `height` có thể là 360, 480, 720 hoặc 1080; mặc định 720. Đây là mức trần chất lượng.
-
-### Hỏi trạng thái (gọi từ backend, mỗi 2–3 giây)
-
-```sh
-curl http://localhost:8080/api/jobs/JOB_ID \
-  -H 'Authorization: Bearer THAY_BANG_KHOA_CUA_BAN'
-```
-
-Trạng thái: `queued`, `processing`, `completed`, `failed`.
-
-```json
-{
-  "jobId": "...",
-  "status": "completed",
-  "progress": 100,
-  "expiresAt": 1800000000000,
-  "downloadPath": "/api/jobs/.../download?token=..."
-}
-```
-
-`expiresAt` là Unix timestamp mili giây. Khi lỗi, có trường `error`. Phần trăm là của từng luồng tải; có thể giảm khi chuyển từ hình sang tiếng.
-
-### Tải file (trình duyệt)
-
-Backend ghép URL gốc của worker và `downloadPath`, gửi link cho frontend. Mở link này để tải MP4; không cần khóa worker. Ai có link đều có quyền tải cho đến khi hết hạn, nên tránh ghi link vào log hoặc chia sẻ công khai. File được giữ để có thể thử tải lại, không xóa ngay sau một lượt tải. Không hỗ trợ HTTP Range/resume.
-
-Backend chính phải xác thực người dùng, áp quota, lưu ánh xạ userId → jobId và kiểm tra quyền sở hữu khi hỏi trạng thái. Worker dùng một khóa chung dành cho backend tin cậy, chưa có tài khoản/quota riêng cho từng người dùng.
-
-## Giới hạn và xử lý lỗi
-
-- Một tác vụ chạy đồng thời, tối đa 30 job đang lưu (kể cả job đã xong).
-- Chỉ nhận link HTTPS của một video YouTube; không nhận playlist hoặc URL máy chủ tùy ý.
-- Video tối đa 20 phút; không hỗ trợ livestream, video từng livestream hay video cần đăng nhập.
-- Ưu tiên H.264 MP4 + AAC; có thể thất bại nếu nguồn không có định dạng phù hợp.
-- Mỗi stream tải tối đa 500 MiB; file kết quả tối đa 500 MiB. Ghép cần thêm dung lượng tạm.
-- Bước đọc thông tin timeout 2 phút; bước tải/ghép timeout 15 phút.
-- File hết hạn 15 phút sau hoàn thành; dọn định kỳ 30 giây, chờ lượt tải đang mở kết thúc.
-- YouTube có thể chặn IP cloud; không bảo đảm mọi video đều tải được. Chưa hỗ trợ cookies.
-- Không có phục hồi job/retry bền vững khi tiến trình chết. Chưa có tính năng hủy job.
-
-## Kiểm thử
-
-Node >=22:
-
-```sh
-npm test
-```
-
-Test dùng chương trình tải giả lập để kiểm tra xác thực, chặn URL sai, hoàn tất job và tải bằng token. Chưa xác minh Docker build, tải YouTube thật hoặc vận hành Azure. Dockerfile cài yt-dlp tại thời điểm build, nên cần kiểm chứng tải thực tế sau mỗi lần build/cập nhật.
+`npm test` dùng engine giả lập để kiểm tra API, xác thực, token tải, giới hạn 1080p và việc không truyền secret vào engine.
+API adapter đã hoàn thành bài thử tải thật 1080p local. Chi tiết bằng chứng nằm trong EXPERIMENT.md và validation/local-api.json. Test giả lập không chứng minh truy cập YouTube từ cloud.
